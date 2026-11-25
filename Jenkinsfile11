@@ -1,41 +1,74 @@
+// Jenkinsfile11 - Linux Jenkins controller (Amazon Linux EC2) with Docker.
+// Build runs inside a Docker container (Docker as a build agent).
+// Deploy runs docker on the host.
 pipeline {
   agent any
 
+  parameters {
+    // Task 1: tick this box to inject a typo into the docker build command
+    booleanParam(name: 'BREAK_BUILD', defaultValue: false,
+                 description: 'Task 1: introduce an error in the docker build command')
+  }
+
   stages {
-      stage('Build') {
+    stage('Build') {
       agent {
-        docker { image 'django:latest' }
+        // django:latest ships Django 1.10.4 / Python 3.4, but this project needs Django 3.2,
+        // so the build agent is python:3.9-slim (same base as the Dockerfile).
+        docker {
+          image 'python:3.9-slim'
+          args '-u root'
+        }
       }
       steps {
-            // Run the Django server in the foreground
-            sh 'python3 manage.py check' 
-            echo 'Django server started. Proceeding to next stage...'
+        sh 'pip install --quiet django==3.2'
+        sh 'python3 manage.py check'
+        echo 'Django project check passed. Proceeding to next stage...'
       }
     }
 
+    // Task 4: Deploy runs only for the develop branch
     stage('Deploy') {
+      when {
+        expression { env.GIT_BRANCH == 'origin/develop' || env.GIT_BRANCH == 'develop' }
+      }
       steps {
-        // Build the image
-        sh 'docker build -t todo .'
-        
-        // Run the container with a specific name (e.g., 'todo_container')
-        sh 'docker run -d -p 8000:8000 --name todo_container todo'
+        script {
+          // Task 1: with BREAK_BUILD ticked this becomes "docker buildd", which fails
+          def buildCmd = params.BREAK_BUILD ? 'buildd' : 'build'
+          sh "docker ${buildCmd} -t todo ."
+        }
+
+        // clear leftovers from an earlier run
+        sh 'docker rm -f todo_container1 todo_container2 || true'
+
+        // Task 2: two containers from the same image, host ports 8000 and 8001 -> container port 8000
+        sh 'docker run -d --name todo_container1 -p 8000:8000 todo'
+        sh 'docker run -d --name todo_container2 -p 8001:8000 todo'
+
+        // verify both are running
+        sh 'sleep 8'
+        sh 'docker ps --filter "name=todo_container" --format "{{.Names}}  {{.Status}}  {{.Ports}}"'
+        sh 'test "$(docker ps -q --filter name=todo_container --filter status=running | wc -l)" = "2"'
+        echo 'Both containers are running.'
+        sleep 30
       }
       post {
         always {
-          echo 'Waiting for 2 minutes before stopping and deleting containers...'
-          // Sleep for 2 minutes before stopping and deleting containers
-          sleep 120
-
-          // Stop the container using its name
-          echo 'Stopping container...'
-          sh 'docker stop todo_container'
-
-          // Remove the container
-          echo 'Removing container...'
-          sh 'docker rm todo_container'
+          // Task 2: stop and remove both containers after deployment
+          echo 'Stopping containers...'
+          sh 'docker stop todo_container1 todo_container2 || true'
+          echo 'Removing containers...'
+          sh 'docker rm todo_container1 todo_container2 || true'
         }
       }
     }
+  }
+
+  // Task 1: pipeline-level post actions
+  post {
+    success { echo 'Pipeline executed successfully' }
+    failure { echo 'Pipeline execution failed' }
+    always  { echo 'Pipeline execution completed' }
   }
 }
